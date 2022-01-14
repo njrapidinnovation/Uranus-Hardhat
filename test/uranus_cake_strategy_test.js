@@ -1,26 +1,214 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const infinity_abi = require("../artifacts/contracts/infinityVault.sol/InfinityVault.json"); 
-
-const zeroAddress = "0x0000000000000000000000000000000000000000";
-
-//Infinity Vault Deployment Params:
-const _name = "Infinity Gamma";
-const _symbol = "iGAMMA";
-const _gToken = "0x0c6dd143F4b86567d6c21E8ccfD0300f00896442" //gGAMMA address
-const _gammaTroller = "0xF54f9e7070A1584532572A6F640F09c606bb9A83"; //GammaTroller address
-const _gamma = "0xb3Cb6d2f8f2FDe203a022201C81a96c167607F15"; //GAMMA address
+const strategy_params = require("../cake_strategy_params.json");
+const params = strategy_params[0];
 
 //Account To Impersonate
-const accountToImpersonate = "0xD1Ec391627c9E2Fb0c570Da876Bc75dF23c42BEB" //Raj's Account
+const ownersAccount = "0xFd525F21C17f2469B730a118E0568B4b459d61B9"; //DALLAS Account
+
+const cake_token_holder = "0xF977814e90dA44bFA03b6295A0616a897441aceC";
+const want = params[0][4];
+const depositAmount  = BigInt(100e18);
+const withdrawAmount = BigInt(10e18);
+
+const farm_Address = "0xB87F7016585510505478D1d160BDf76c1f41b53d";
 
 let user1;
 let user2;
-let user3;
-let _withdrawFeeAddress;
-let _performanceFeeAddress;
-let infinityVault;
-let gToken;
+let owner;
+let strategy;
+let pool_id;
+let pending_gamma_in_old_cake_strat;
+let pending_gamma_in_new_cake_strat;
+
+describe("RESET MAINNET FORK",function () {
+  it("Should reset mainnet fork",async function () {
+    await network.provider.request({
+      method: "hardhat_reset",
+      params: [
+        {
+          forking: {
+            jsonRpcUrl: "https://speedy-nodes-nyc.moralis.io/f19381e84e5c8dde5935ae3e/bsc/mainnet/archive",
+          },
+        },
+      ],
+    });
+  });
+});
+
+describe("STRATEGY CONTRACT DEPLOYMENT", function () {
+  
+  it("Should Deploy Strategy", async function () {
+    
+    [user1,user2] = await ethers.getSigners();
+    owner = await ethers.getSigner(ownersAccount);
+    const Strategy = await ethers.getContractFactory("contracts/uranus_cake_strategy_old.sol:GammaStrategy_Uranus");
+    strategy = await Strategy.deploy(
+      params[0],
+      params[1],
+      params[2],
+      params[3],
+      params[4],
+      params[5],
+      params[6],
+      params[7],
+      params[8],
+      params[9],
+      params[10],
+      params[11],
+      params[12],
+      params[13],
+      params[14],
+    );
+
+  });
+
+});
+
+describe("ADD DEPLOYED STRATEGY TO THE FARM",function(){
+
+  it("should revert with `Ownable: caller is not the owner`",async function () {
+
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+
+    pool_id = Number(await farm.poolLength());
+
+    const tx = farm.add(0,want,false,strategy.address);
+
+    await expect(tx).to.be.revertedWith("Ownable: caller is not the owner");
+
+  })
+
+  it("should add the new pool into the farm",async() => {
+    
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+
+    await hre.network.provider.request({
+      method: "hardhat_impersonateAccount",
+      params: [owner.address],
+    });
+
+    await farm.connect(owner).add(0,want,false,strategy.address);
+
+    //close impersonating
+    await hre.network.provider.request({
+      method: "hardhat_stopImpersonatingAccount",
+      params: [owner.address],
+    });
+
+  });
+
+})
+
+describe("TRANSFER CAKE BALANCE INTO THE USER2 account",function(){
+
+  it("should transfer and check the cake balance of `cake_token_holder` address to user2`",async function () {
+
+    const cake_inst = await ethers.getContractAt("contracts/aqua.sol:AQUA",want);
+
+    const cake_token_holder_cake_bal = (await cake_inst.balanceOf(cake_token_holder));
+
+    if(cake_token_holder_cake_bal > 0){
+      
+      const signer = await ethers.getSigner(cake_token_holder);
+
+      await hre.network.provider.request({
+        method: "hardhat_impersonateAccount",
+        params: [signer.address],
+      });
+  
+      await cake_inst.connect(signer).transfer(user2.address,cake_token_holder_cake_bal);
+  
+      //close impersonating
+      await hre.network.provider.request({
+        method: "hardhat_stopImpersonatingAccount",
+        params: [signer.address],
+      });
+      
+      const user2_cake_token_bal = (await cake_inst.balanceOf(user2.address));
+
+      expect(cake_token_holder_cake_bal).to.equal(user2_cake_token_bal);
+    }
+
+  })
+
+})
+
+describe(`DEPOSIT ${depositAmount/BigInt(1e18)} CAKE in new pool`,function(){
+
+  it("should approve the farm to spend user2 want tokens",async function() {
+
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    const info = await farm.poolInfo(pool_id);
+    const want = info['want'];
+
+    const want_inst = await ethers.getContractAt("contracts/aqua.sol:AQUA",want);
+    const allowance = await want_inst.allowance(user2.address,farm_Address);
+
+    if(depositAmount > allowance){
+      await want_inst.connect(user2).approve(farm_Address,BigInt(Math.pow(2,256)) - BigInt(1));
+    }
+
+  });
+
+  it(`should deposit user2 ${depositAmount/BigInt(1e18)} CAKE `,async function() {
+
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    await farm.connect(user2).deposit(pool_id,depositAmount);
+    
+  });
+
+  it(`should deposit user2 ${depositAmount/BigInt(1e18)} CAKE AGAIN AFTER 1 hour`,async function() {
+    
+    // console.log("\n BLOCK NUMBER BEFORE MINING",await ethers.provider.getBlockNumber());
+    for(let  i = 0 ; i < 1200 ; i++){
+      await network.provider.send("evm_mine")
+    }
+    // console.log("\n BLOCK NUMBER AFTER MINING",await ethers.provider.getBlockNumber());
+
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    await farm.connect(user2).deposit(pool_id,depositAmount);
+    
+  });
+
+})
+
+describe(`TEST WITHDRAW ${withdrawAmount/BigInt(1e18)} WANT TOKENS`,function() {
+  
+  // it("should print user2 pending gamma before mining blocks",async function() {
+  //   console.log("PENDING GAMMA BEFORE MINING BLOCKS",(await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma);
+  // });
+
+  it("should mine block for 2hrs",async function() {  
+    for(let  i = 0 ; i < 2400 ; i++){
+      await network.provider.send("evm_mine")
+    }
+    // console.log("PENDING GAMMA AFTER MINING BLOCKS BEFORE WITHDRAW",(await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma);
+  });
+
+  it(`should withdraw ${withdrawAmount/BigInt(1e18)} WANT TOKENS`,async function() {
+    
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    await farm.connect(user2).withdraw(pool_id,withdrawAmount);
+
+  });
+
+  it("should print user2 pending gamma after withdraw after 1 block",async function() {
+    for(let  i = 0 ; i < 1 ; i++){
+      await network.provider.send("evm_mine")
+    }
+    pending_gamma_in_old_cake_strat = (await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma
+    //console.log("PENDING GAMMA AFTER MINING 1 BLOCK AFTER WITHDRAW",(await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma);
+  });
+
+})
+
+
+/********************************************COPY ABOVE CODE FOR NEW CAKE STRATEGY**************************************/
+
+
+
+
 
 
 describe("RESET MAINNET FORK",function () {
@@ -38,367 +226,184 @@ describe("RESET MAINNET FORK",function () {
   });
 });
 
-
-describe("INFINITY VAULT CONTRACT DEPLOYMENT", function () {
+describe("STRATEGY CONTRACT DEPLOYMENT", function () {
   
-  it("Should Deploy", async function () {
-    [user1,user2,user3,user4] = await ethers.getSigners();
-    _withdrawFeeAddress = user3.address;
-    _performanceFeeAddress = user4.address;
-    const InfinityVault = await ethers.getContractFactory("contracts/infinityVault.sol:InfinityVault");
-    infinityVault = await InfinityVault.deploy(_name,_symbol,_gToken,_gammaTroller,_withdrawFeeAddress,_performanceFeeAddress,_gamma);
-  });
+  it("Should Deploy Strategy", async function () {
+    
+    [user1,user2] = await ethers.getSigners();
+    owner = await ethers.getSigner(ownersAccount);
+    const Strategy = await ethers.getContractFactory("contracts/uranus_cake_strategy_new.sol:GammaStrategy_Uranus");
+    strategy = await Strategy.deploy(
+      params[0],
+      params[1],
+      params[2],
+      params[3],
+      params[4],
+      params[5],
+      params[6],
+      params[7],
+      params[8],
+      params[9],
+      params[10],
+      params[11],
+      params[12],
+      params[13],
+      params[14],
+    );
 
-  it("Should Check Name", async function () {
-    const name = await infinityVault.name();
-    expect(_name).to.equal(name);
-  });
-
-  it("Should Check Symbol", async function () {
-    const symbol = await infinityVault.symbol();
-    expect(_symbol).to.equal(symbol);
-  });
-
-  it("Should Check gToken Address", async function () {
-    const gToken_address = await infinityVault.gToken();
-    expect(_gToken).to.equal(gToken_address);
-  });
-
-  it("Should Check gammaTroller Address", async function () {
-    const gammaTroller = await infinityVault.gammaTroller();
-    expect(_gammaTroller).to.equal(gammaTroller);
-  });
-
-  it("Should Check gamma token allowance to gToken contract is uint96 MAX or Not", async function () {
-    const GAMMA = await ethers.getContractAt(infinity_abi.abi,_gamma);
-    const allowance = await GAMMA.allowance(infinityVault.address,_gToken);
-    const allowance_val = BigInt(Math.pow(2,96)) - BigInt(1);
-    expect(allowance).to.equal(allowance_val);
-  });
-  it("Should Check withdrawFeeAddress", async function () {
-    const withdrawFeeAddress = await infinityVault.withdrawFeeAddress();
-    expect(withdrawFeeAddress).to.equal(_withdrawFeeAddress);
-  });
-  it("Should Check performanceFeeAddress", async function () {
-    const performanceFeeAddress = await infinityVault.performanceFeeAddress();
-    expect(performanceFeeAddress).to.equal(_performanceFeeAddress);
-  });
-
-  it("Should Check minTime ToWithdraw gTOKEN", async function () {
-    const minTimeToWithdraw = await infinityVault.minTimeToWithdraw();
-    const minTime = 21 * 24 * 60 * 60; //21days 
-    expect(minTimeToWithdraw).to.equal(minTime);
   });
 
 });
 
-describe("IMPERSONATE ACCOUNT",function () {
+describe("ADD DEPLOYED STRATEGY TO THE FARM",function(){
 
-  let impersonated_gTOKEN_bal;
+  it("should revert with `Ownable: caller is not the owner`",async function () {
 
-  it("Should Impersonate account and check gTOKEN balance of users with impersonated account", async function () {
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
 
-    gToken = await ethers.getContractAt("contracts/gToken.sol:GErc20Delegator",_gToken);
-    const gamma_token = await ethers.getContractAt("contracts/gToken.sol:GErc20Delegator",_gamma);
+    pool_id = Number(await farm.poolLength());
+
+    const tx = farm.add(0,want,false,strategy.address);
+
+    await expect(tx).to.be.revertedWith("Ownable: caller is not the owner");
+
+  })
+
+  it("should add the new pool into the farm",async() => {
     
-    //impersonating raj account
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+
     await hre.network.provider.request({
       method: "hardhat_impersonateAccount",
-      params: [accountToImpersonate],
+      params: [owner.address],
     });
 
-    //Check impersonated account gTOKEN balance
-    const signer = await ethers.getSigner(accountToImpersonate)
-    impersonated_gTOKEN_bal = await gToken.balanceOf(accountToImpersonate);
-
-    const impersonated_gamma_bal = await gamma_token.balanceOf(accountToImpersonate);
-
-    //Transfer impersonated account half gTOKEN balance to user1 and half to user2 if impersonated_gTOKEN_bal > 0
-    if( impersonated_gTOKEN_bal > 0){
-      
-      const amount_send_to_user1 = BigInt(impersonated_gTOKEN_bal) / BigInt(2);
-      const amount_send_to_user2 = BigInt(impersonated_gTOKEN_bal) - amount_send_to_user1;
-
-      await gToken.connect(signer).transfer(user1.address, amount_send_to_user1);
-      await gToken.connect(signer).transfer(user2.address, amount_send_to_user2);
-      await gamma_token.connect(signer).transfer(user1.address, impersonated_gamma_bal);
-      
-      const user1_gTOKEN_bal = await gToken.balanceOf(user1.address)
-      const user2_gTOKEN_bal = await gToken.balanceOf(user2.address)
-      const user1_gamma_bal = await gamma_token.balanceOf(user1.address)
-
-      expect(user1_gTOKEN_bal).to.equal(amount_send_to_user1);
-      expect(user2_gTOKEN_bal).to.equal(amount_send_to_user2);
-      expect(user1_gamma_bal).to.equal(impersonated_gamma_bal);
-
-    }
+    await farm.connect(owner).add(0,want,false,strategy.address);
 
     //close impersonating
     await hre.network.provider.request({
       method: "hardhat_stopImpersonatingAccount",
-      params: [accountToImpersonate],
+      params: [owner.address],
     });
-    
+
   });
 
-});
+})
 
-//Amount to be deposited by both user1 and user2
-const amount = BigInt(101e8);
+describe("TRANSFER CAKE BALANCE INTO THE USER2 account",function(){
 
-describe("TEST DEPOSIT", function () {
+  it("should transfer and check the cake balance of `cake_token_holder` address to user2`",async function () {
 
-  it(`User1 Approves and deposit ${amount} gTOKEN into infinity vault`,async function () {
-    
-    //User1
-    let allowance = await gToken.allowance(user1.address,infinityVault.address);
-    if(amount > allowance){
-      await gToken.connect(user1).approve(infinityVault.address,amount);
-      allowance = await gToken.allowance(user1.address,infinityVault.address);
+    const cake_inst = await ethers.getContractAt("contracts/aqua.sol:AQUA",want);
+
+    const cake_token_holder_cake_bal = (await cake_inst.balanceOf(cake_token_holder));
+
+    if(cake_token_holder_cake_bal > 0){
+      
+      const signer = await ethers.getSigner(cake_token_holder);
+
+      await hre.network.provider.request({
+        method: "hardhat_impersonateAccount",
+        params: [signer.address],
+      });
+  
+      await cake_inst.connect(signer).transfer(user2.address,cake_token_holder_cake_bal);
+  
+      //close impersonating
+      await hre.network.provider.request({
+        method: "hardhat_stopImpersonatingAccount",
+        params: [signer.address],
+      });
+      
+      const user2_cake_token_bal = (await cake_inst.balanceOf(user2.address));
+
+      expect(cake_token_holder_cake_bal).to.equal(user2_cake_token_bal);
     }
-    expect(allowance).to.equal(amount);
 
-    const exchangeRate = await infinityVault.iTokenExchangeRate();
-    const iGAMMA_minted = BigInt(amount) * BigInt(1e18) / BigInt(exchangeRate);
+  })
 
-    await infinityVault.deposit(amount);
+})
 
-    const iGAMMA_user1_balance = await infinityVault.balanceOf(user1.address);
-    expect(iGAMMA_user1_balance).to.equal(iGAMMA_minted);
-    
-  });
+describe(`DEPOSIT ${depositAmount/BigInt(1e18)} CAKE in new pool`,function(){
 
-  it(`User2 Approves and deposit ${amount} gTOKEN after 24 hr into infinity vault`,async function () {
+  it("should approve the farm to spend user2 want tokens",async function() {
 
-    const time = 1 * 24 * 60 * 60
-    await network.provider.send("evm_increaseTime", [time])
-    await network.provider.send("evm_mine")
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    const info = await farm.poolInfo(pool_id);
+    const want = info['want'];
 
-    //User2
-    let allowance = await gToken.allowance(user2.address,infinityVault.address);
-    if(amount > allowance){
-      await gToken.connect(user2).approve(infinityVault.address,amount);
-      allowance = await gToken.allowance(user2.address,infinityVault.address);
+    const want_inst = await ethers.getContractAt("contracts/aqua.sol:AQUA",want);
+    const allowance = await want_inst.allowance(user2.address,farm_Address);
+
+    if(depositAmount > allowance){
+      await want_inst.connect(user2).approve(farm_Address,BigInt(Math.pow(2,256)) - BigInt(1));
     }
-    expect(allowance).to.equal(amount);
 
-    const exchangeRate = await infinityVault.iTokenExchangeRate();
-    const iGAMMA_minted = BigInt(amount) * BigInt(1e18) / BigInt(exchangeRate);
+  });
 
-    await infinityVault.connect(user2).deposit(amount);
+  it(`should deposit user2 ${depositAmount/BigInt(1e18)} CAKE `,async function() {
 
-    const iGAMMA_user2_balance = await infinityVault.balanceOf(user2.address);
-    expect(iGAMMA_user2_balance).to.equal(iGAMMA_minted);
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    await farm.connect(user2).deposit(pool_id,depositAmount);
     
   });
 
-  it("should revert with Reason if 0 amount is deposited",async function () {
-    await expect(infinityVault.deposit(0)).to.be.revertedWith("Nothing to deposit");
-  })
-
-});
-
-
-describe("TEST EARN",function () {
-
-  it("check performance Fee",async function() {
-
-    // const gammaTroller_inst = await ethers.getContractAt("contracts/Gammatroller.sol:Gammatroller",_gammaTroller);
-    // await gammaTroller_inst["claimGamma(address[],address[],bool,bool)"]([infinityVault.address],[_gToken],false,true);
-
-
-    const performance_fee_address = await infinityVault.performanceFeeAddress();
-
-    const PERFORMNACE_FEE_ADDRESS_OLD_GGAMMA_BAL = await gToken.balanceOf(performance_fee_address);
+  it(`should deposit user2 ${depositAmount/BigInt(1e18)} CAKE AGAIN AFTER 1 hour`,async function() {
     
-    const performanceFee = await infinityVault.performanceFee();
+    // console.log("\n BLOCK NUMBER BEFORE MINING",await ethers.provider.getBlockNumber());
+    for(let  i = 0 ; i < 1200 ; i++){
+      await network.provider.send("evm_mine")
+    }
+    // console.log("\n BLOCK NUMBER AFTER MINING",await ethers.provider.getBlockNumber());
 
-    const INFINITY_VAULT_OLD_GGAMMA_BALANCE = await gToken.balanceOf(infinityVault.address);
-
-    await infinityVault._earn();
-
-    const PERFORMNACE_FEE_ADDRESS_NEW_GGAMMA_BAL = await gToken.balanceOf(performance_fee_address);
-
-    const INFINITY_VAULT_NEW_GGAMMA_BALANCE = BigInt(INFINITY_VAULT_OLD_GGAMMA_BALANCE) + (BigInt(10000) / BigInt(performanceFee)) * 
-    BigInt(PERFORMNACE_FEE_ADDRESS_NEW_GGAMMA_BAL - PERFORMNACE_FEE_ADDRESS_OLD_GGAMMA_BAL);
-
-    let fee = INFINITY_VAULT_NEW_GGAMMA_BALANCE - BigInt(INFINITY_VAULT_OLD_GGAMMA_BALANCE);
-    fee = BigInt(fee) * BigInt(performanceFee) / BigInt(10000);
-
-    expect(BigInt(PERFORMNACE_FEE_ADDRESS_NEW_GGAMMA_BAL - PERFORMNACE_FEE_ADDRESS_OLD_GGAMMA_BAL)).to.equal(fee);
-
-  })
-
-});
-
-describe("TEST UNSTAKING",function() {
-
-  it("test with unstakeAmount as 0",async function() {
-    await expect(infinityVault.startUnstake(0)).to.be.revertedWith("!!Unstake Amount should be greater than zero");
-  })
-
-  it("test with unstakeAmount greater than iGAMMA balance",async function() {
-    const user_iGAMMA_bal = await infinityVault.balanceOf(user1.address);
-    const _amount = user_iGAMMA_bal + BigInt(1);
-    await expect(infinityVault.startUnstake(_amount)).to.be.revertedWith(
-      "unstakeTokenAmount should be less than or equal to amount of iGAMMA user can unstake more");
-  })
-
-  it("Give entire iGAMMA for unstaking",async function() {
-    const iGAMMA_bal = await infinityVault.balanceOf(user1.address);
-    await infinityVault.connect(user1).startUnstake(iGAMMA_bal);
-  })
-
-  it("should print user unstaking info",async function() {
-    const user_info = await infinityVault.userInfo(user1.address);
-    console.log("\n",user_info);
-  })
-
-});
-
-
-describe("TEST CLAIM",function() {
-
-  it("TEST CLAIM BEFORE MIN WITHDRAW TIME",async function() {
-    await expect(infinityVault.claimAfterUnstakeTimeLimit()).to.be.revertedWith("too early");
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    await farm.connect(user2).deposit(pool_id,depositAmount);
+    
   });
 
-  // it("TEST CLAIM INSTANTLY",async function() {
-  //   const userInfo = await infinityVault.userInfo(user1.address);
-  //   const exchangeRate = await infinityVault.iTokenExchangeRate();
-  //   const amount_of_igamma_burn = userInfo['amountToBeUnstaked'];
-  //   const amount_of_ggamma_withdrawed = BigInt(amount_of_igamma_burn) * BigInt(exchangeRate) / BigInt(1e18);
-    
-  //   const newTotalSupply = BigInt(await infinityVault.totalSupply()) - BigInt(amount_of_igamma_burn);
-  //   const fee =  BigInt(amount_of_ggamma_withdrawed) * BigInt(await infinityVault.instantWithdrawFee()) / BigInt(10000);
-  //   const user1NewGgamma_bal = BigInt(await gToken.balanceOf(user1.address)) + amount_of_ggamma_withdrawed - fee
+})
 
-  //   await infinityVault.claimInstantly();
-
-  //   const user_info = await infinityVault.userInfo(user1.address);
-  //   console.log("\n",user_info);
-  //   //console.log("TOTAL GGAMMA WITHDRAWED",amount_of_ggamma_withdrawed);
-  //   //console.log("\n","WITHDRAW FEE ADDRESS GGAMMA BALANCE",await gToken.balanceOf(await infinityVault.withdrawFeeAddress()))
-
-  //   expect(await infinityVault.totalSupply()).to.equal(newTotalSupply);
-  //   expect(await gToken.balanceOf(await infinityVault.withdrawFeeAddress())).to.equal(fee);
-  //   expect(await gToken.balanceOf(user1.address)).to.equal(user1NewGgamma_bal);
-
+describe(`TEST WITHDRAW ${withdrawAmount/BigInt(1e18)} WANT TOKENS`,function() {
+  
+  // it("should print user2 pending gamma before mining blocks",async function() {
+  //   console.log("PENDING GAMMA BEFORE MINING BLOCKS",(await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma);
   // });
 
-  it("TEST CLAIM AFTER MIN WITHDRAW TIME",async function() {
+  it("should mine block for 2hrs",async function() {  
+    for(let  i = 0 ; i < 2400 ; i++){
+      await network.provider.send("evm_mine")
+    }
+    // console.log("PENDING GAMMA AFTER MINING BLOCKS BEFORE WITHDRAW",(await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma);
+  });
+
+  it(`should withdraw ${withdrawAmount/BigInt(1e18)} WANT TOKENS`,async function() {
     
-    const time = 21 * 24 * 60 * 60
-    await network.provider.send("evm_increaseTime", [time])
-    await network.provider.send("evm_mine")
-    
-    const userInfo = await infinityVault.userInfo(user1.address);
-    const exchangeRate = await infinityVault.iTokenExchangeRate();
-    const amount_of_igamma_burn = userInfo['amountToBeUnstaked'];
-    const amount_of_ggamma_withdrawed = BigInt(amount_of_igamma_burn) * BigInt(exchangeRate) / BigInt(1e18);
-    
-    const newTotalSupply = BigInt(await infinityVault.totalSupply()) - BigInt(amount_of_igamma_burn);
-    const fee =  BigInt(amount_of_ggamma_withdrawed) * BigInt(await infinityVault.normalWithdrawFee()) / BigInt(10000);
-    const user1NewGgamma_bal = BigInt(await gToken.balanceOf(user1.address)) + amount_of_ggamma_withdrawed - fee
-
-    await infinityVault.claimAfterUnstakeTimeLimit();
-
-    const user_info = await infinityVault.userInfo(user1.address);
-    console.log("\n",user_info);
-
-    expect(await infinityVault.totalSupply()).to.equal(newTotalSupply);
-    expect(await gToken.balanceOf(await infinityVault.withdrawFeeAddress())).to.equal(fee);
-    expect(await gToken.balanceOf(user1.address)).to.equal(user1NewGgamma_bal);
+    const farm = await ethers.getContractAt("contracts/farm.sol:PlanetFinance",farm_Address);
+    await farm.connect(user2).withdraw(pool_id,withdrawAmount);
 
   });
 
-});
-
-
-describe("TEST CHANGING WITHDRAW FEE ADDRESS",function () {
-
-  it("should revert with `_newWithdrawFeeAddress should no be zero address`",async function() {
-    await expect(infinityVault.changeWithdrawFeeAddress(zeroAddress)).to.be.revertedWith("newWithdrawFeeAddress should no be zero address");
+  it("should print user2 pending gamma after withdraw after 1 block",async function() {
+    for(let  i = 0 ; i < 1 ; i++){
+      await network.provider.send("evm_mine")
+    }
+    pending_gamma_in_new_cake_strat = (await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma
+    //console.log("PENDING GAMMA AFTER MINING 1 BLOCK AFTER WITHDRAW",(await strategy.userPendingGammaProfit(user2.address)).pendingProfitInGamma);
   });
 
-  it("should revert with `Ownable: caller is not the owner`",async function() {
-    await expect(infinityVault.connect(user2).changeWithdrawFeeAddress(zeroAddress)).to.be.revertedWith("Ownable: caller is not the owner");
-  });
-
-  it("should change the withdraw fee address`",async function() {
-    await infinityVault.changeWithdrawFeeAddress(user2.address);
-    expect(await infinityVault.withdrawFeeAddress()).to.equal(user2.address);
-  });
-
-});
-
-describe("TEST CHANGING PERFORMANCE FEE ADDRESS",function () {
-
-  it("should revert with `_newPerformanceFeeAddress should no be zero address`",async function() {
-    await expect(infinityVault.changePerformanceFeeAddress(zeroAddress)).to.be.revertedWith("_newPerformanceFeeAddress should no be zero address");
-  });
-
-  it("should revert with `Ownable: caller is not the owner`",async function() {
-    await expect(infinityVault.connect(user2).changePerformanceFeeAddress(zeroAddress)).to.be.revertedWith("Ownable: caller is not the owner");
-  });
-
-  it("should change the performance fee address`",async function() {
-    await infinityVault.changePerformanceFeeAddress(user3.address);
-    expect(await infinityVault.performanceFeeAddress()).to.equal(user3.address);
-  });
-
-});
-
-describe("TEST SETSETTINGS",function () {
-
-  const normalFee = BigInt(400);
-  const instantFee = BigInt(800);
-  const performanceFee = BigInt(2000)
-
-  it("should revert with `_normalWithdrawFee too high`",async function() {
-    await expect(infinityVault.setSettings(600,instantFee,performanceFee)).to.be.revertedWith("_normalWithdrawFee too high");
-  });
-
-  it("should revert with `_instantWithdrawFee too high`",async function() {
-    await expect(infinityVault.setSettings(normalFee,1100,performanceFee)).to.be.revertedWith("_instantWithdrawFee too high");
-  });
-
-  it("should revert with `_performanceFee too high`",async function() {
-    await expect(infinityVault.setSettings(normalFee,instantFee,3000)).to.be.revertedWith("_performanceFee too high");
-  });
-
-  it("should revert with `Ownable: caller is not the owner`",async function() {
-    await expect(infinityVault.connect(user2).setSettings(normalFee,instantFee,performanceFee)).to.be.revertedWith("Ownable: caller is not the owner");
-  });
-
-  it("should change the new normal,instant, performance fee`",async function() {
-    await infinityVault.setSettings(normalFee,instantFee,performanceFee);
-    expect(await infinityVault.normalWithdrawFee()).to.equal(normalFee);
-    expect(await infinityVault.instantWithdrawFee()).to.equal(instantFee);
-    expect(await infinityVault.performanceFee()).to.equal(performanceFee);
-  });
-
-});
+})
 
 
-describe("TEST SET MIN TIME TO WITHDRAW",function() {
+/**********************************************FINAL RESULTS ******************************************************/
 
-  const minTimeToWithdraw = BigInt(22 * 24 * 60 * 60);
-  const wrongMinTimeToWithdraw = BigInt(40 * 24 * 60 * 60);
 
-  it("should revert with `too high",async function() {
-    await expect(infinityVault.setMinTimeToWithdraw(wrongMinTimeToWithdraw)).to.be.revertedWith("too high");
-  });
+describe(`PRINT PENDING GAMMA RESULTS FROM BOTH OLD AND NEW STRATEGIES`,function() {
+  it("PRINT",async function(){
+    console.log("\n PENDING GAMMA FOR OLD STRATEGY : ",pending_gamma_in_old_cake_strat);
+    console.log("\n PENDING GAMMA FOR NEW STRATEGY : ",pending_gamma_in_new_cake_strat);
+  })
+})
 
-  it("should revert with `Ownable: caller is not the owner",async function() {
-    await expect(infinityVault.connect(user2).setMinTimeToWithdraw(minTimeToWithdraw)).to.be.revertedWith("Ownable: caller is not the owner");
-  });
 
-  it(`should change the min time to draw to ${minTimeToWithdraw}`,async function() {
-    await infinityVault.setMinTimeToWithdraw(minTimeToWithdraw);
-    expect(await infinityVault.minTimeToWithdraw()).to.equal(minTimeToWithdraw);
-  });
-
-});
 
 

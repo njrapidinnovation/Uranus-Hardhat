@@ -1842,12 +1842,13 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         if(depositFee > 0){
             IERC20(wantAddress).transfer(depositFeeAddress, depositFee);
         }
+
+        _wantAmt = _wantAmt.sub(depositFee);
         
         if (isAutoComp) {
-            _farm();
+            _farm(_wantAmt);
             //Make sure user doesn't rewards instantly for his deposit
             user.earnRewardDebt = sharesAdded.mul(stratRewardPerShare).add(user.earnRewardDebt); 
-
         } else {
             wantLockedTotal = wantLockedTotal.add(_wantAmt);
         }
@@ -1855,14 +1856,30 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         return sharesAdded;
     }
 
-    function _farm() internal virtual {
+    function _farm(uint256 wantAmt) internal virtual {
+        
         require(isAutoComp, "!isAutoComp");
-        uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
         wantLockedTotal = wantLockedTotal.add(wantAmt);
         IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
 
         if (isCAKEStaking) {
+
+            uint256 cakeRewardsBefore = IERC20(earnedAddress).balanceOf(address(this)).sub(wantAmt);
             IPancakeswapFarm(farmContractAddress).enterStaking(wantAmt); // Just for CAKE staking, we dont use deposit()
+            uint256 cakeRewardsAfter = IERC20(earnedAddress).balanceOf(address(this));
+            
+            uint256 diff;
+            if(cakeRewardsAfter > cakeRewardsBefore)
+            diff = cakeRewardsAfter - cakeRewardsBefore;
+            else
+            diff = 0;
+
+            if(diff > 0){
+                diff = distributeFees(diff);
+                diff = buyBack(diff); 
+            }
+
+            stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
         } else {
             uint256 cakeBefore = IERC20(earnedAddress).balanceOf(address(this));
             IPancakeswapFarm(farmContractAddress).deposit(pid, wantAmt);
@@ -1885,7 +1902,23 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
     function _unfarm(uint256 _wantAmt) internal virtual {
         if (isCAKEStaking) {
+
+            uint256 cakeRewardsBefore = IERC20(earnedAddress).balanceOf(address(this)).add(_wantAmt);
             IPancakeswapFarm(farmContractAddress).leaveStaking(_wantAmt); // Just for CAKE staking, we dont use withdraw()
+            uint256 cakeRewardsAfter = IERC20(earnedAddress).balanceOf(address(this));
+            
+            uint256 diff;
+            if(cakeRewardsAfter > cakeRewardsBefore)
+            diff = cakeRewardsAfter - cakeRewardsBefore;
+            else
+            diff = 0;
+
+            if(diff > 0){
+                diff = distributeFees(diff);
+                diff = buyBack(diff); 
+            } 
+
+            stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
         } else {
             uint256 cakeBefore = IERC20(earnedAddress).balanceOf(address(this));
             IPancakeswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
@@ -1896,12 +1929,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
             diff = cakeAfter - cakeBefore;
             else
             diff = 0;
-
-            if(diff > 0){
-                diff = distributeFees(diff);
-                diff = buyBack(diff); 
-            } 
-
+            
             stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
         }
     }
@@ -1945,8 +1973,8 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         }
 
         if(user.shares > sharesRemoved){
-        user.shares = user.shares.sub(sharesRemoved);
-        user.earnRewardDebt = (user.shares).mul(stratRewardPerShare);   
+        user.earnRewardDebt = (user.shares).mul(stratRewardPerShare);  
+        user.shares = user.shares.sub(sharesRemoved); 
         sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         else{
@@ -1954,7 +1982,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         user.earnRewardDebt = 0;
         sharesTotal = sharesTotal.sub(user.shares);
         }
-        
+
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
         if(_wantAmt > wantAmt) {
             _wantAmt = wantAmt;
@@ -1982,9 +2010,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         pendingProfit = ((user.shares).mul(stratRewardPerShare).sub(user.earnRewardDebt)).div(1e12);
         else
         pendingProfit = 0;
-        
-        require(pendingProfit > 0 ,"No Profits Are Pending!!");
-        
+
         /*Safety Check*/
         uint256 cakeBal = IERC20(earnedAddress).balanceOf(address(this));
         if (pendingProfit > cakeBal) {
@@ -1993,7 +2019,6 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         
         if(pendingProfit > 0){
             
-            // uint256[] memory amounts = IPancakeRouter02(planetRouterAddress).getAmountsOut(pendingProfit,earnedToGAMMAPath);
             /*Buy GAMMA using remaining profit*/
             
             IERC20(earnedAddress).safeIncreaseAllowance(
@@ -2009,10 +2034,6 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
                     caller,
                     block.timestamp.add(600)
                 );
-
-        
-        // uint256 claim = amounts[amounts.length - 1];
-    
         }
         
         lastEarnBlock = block.number;
@@ -2075,15 +2096,14 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         pendingProfit = 0;
         
         require(pendingProfit > 0 ,"No Profits Are Pending!!");
-        
-        /*Safety Check*/
+
         uint256 cakeBal = IERC20(earnedAddress).balanceOf(address(this));
         if (pendingProfit > cakeBal) {
             pendingProfit = cakeBal;
         }
         
         if(pendingProfit > 0){
-        
+         
             // uint256[] memory amounts = IPancakeRouter02(planetRouterAddress).getAmountsOut(pendingProfit,earnedToGAMMAPath);
             /*Buy GAMMA using remaining profit*/
             

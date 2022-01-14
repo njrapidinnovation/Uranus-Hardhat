@@ -21,7 +21,7 @@ const BNB_PRIVATE_KEY = '42d029c8fe7834fff5cf7f99a8434642d6eed45ac26cb748ada74f1
 
 module.exports = {
   mocha: {
-    timeout: 60000
+    timeout: 600000
   },
   defaultNetwork: "localhost",
   networks: {

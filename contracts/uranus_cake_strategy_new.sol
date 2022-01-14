@@ -1973,8 +1973,8 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         }
 
         if(user.shares > sharesRemoved){
-        user.earnRewardDebt = (user.shares).mul(stratRewardPerShare);
-        user.shares = user.shares.sub(sharesRemoved);   
+        user.shares = user.shares.sub(sharesRemoved); 
+        user.earnRewardDebt = (user.shares).mul(stratRewardPerShare);  
         sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         else{
@@ -2359,7 +2359,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     }
 }
 
-contract GammaStrategy_Urarnus is StratX2 {
+contract GammaStrategy_Uranus is StratX2 {
     
     address payable public feeAddressesSetter;
     
