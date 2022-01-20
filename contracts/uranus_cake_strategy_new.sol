@@ -1820,30 +1820,28 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
             address(this),
             _wantAmt
         );
-        uint256 sharesAdded = _wantAmt;
-        if (wantLockedTotal > 0 && sharesTotal > 0) {
-            sharesAdded = _wantAmt
-                .mul(sharesTotal)
-                .mul(entranceFeeFactor)
-                .div(wantLockedTotal)
-                .div(entranceFeeFactorMax);
-            sharesTotal = sharesTotal.add(sharesAdded);
-            user.shares = user.shares.add(sharesAdded);
-        }
-        else{
-            sharesAdded = sharesAdded
-                .mul(entranceFeeFactor)
-                .div(entranceFeeFactorMax);
-            sharesTotal = sharesTotal.add(sharesAdded);
-            user.shares = user.shares.add(sharesAdded);
-        }
-                
+
+        
         uint256 depositFee = _wantAmt.mul(entranceFeeFactorMax.sub(entranceFeeFactor)).div(entranceFeeFactorMax);
         if(depositFee > 0){
             IERC20(wantAddress).transfer(depositFeeAddress, depositFee);
         }
 
         _wantAmt = _wantAmt.sub(depositFee);
+
+        uint256 sharesAdded = _wantAmt;
+        if (wantLockedTotal > 0 && sharesTotal > 0) {
+            sharesAdded = _wantAmt
+                .mul(sharesTotal)
+                .div(wantLockedTotal);
+            sharesTotal = sharesTotal.add(sharesAdded);
+            user.shares = user.shares.add(sharesAdded);
+        }
+        else{
+            sharesAdded = sharesAdded;
+            sharesTotal = sharesTotal.add(sharesAdded);
+            user.shares = user.shares.add(sharesAdded);
+        }
         
         if (isAutoComp) {
             _farm(_wantAmt);
