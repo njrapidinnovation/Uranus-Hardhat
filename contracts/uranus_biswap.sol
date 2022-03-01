@@ -1,15 +1,3 @@
-/**
- *Submitted for verification at BscScan.com on 2021-12-17
-*/
-
-/**
- *Submitted for verification at BscScan.com on 2021-07-16
-*/
-
-/**
- *Submitted for verification at BscScan.com on 2021-07-13
-*/
-
 pragma solidity 0.6.12;
 
 // SPDX-License-Identifier: MIT
@@ -1362,7 +1350,7 @@ interface IPancakeswapFarm {
         returns (uint256);
 
     // View function to see pending CAKEs on frontend.
-    function pendingBELT(uint256 _pid, address _user)
+    function pendingBSW(uint256 _pid, address _user)
         external
         view
         returns (uint256);
@@ -1710,11 +1698,21 @@ contract Pausable is Context {
     }
 }
 
+interface GammaTroller {
+    function claimGamma(address[] memory holders,address[] memory gTokens,bool borrowers,bool suppliers) external ;
+}
+
 interface IWBNB is IERC20 {
     function deposit() external payable;
 
     function withdraw(uint256 wad) external;
 }
+
+interface GammaInfinityVault {
+
+    function depositAuthorized(address userAddress,uint256 _amount) external;
+
+} 
 
 
 abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
@@ -1735,6 +1733,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     address public earnedAddress;
     address public uniRouterAddress; // uniswap, pancakeswap etc
     address public planetRouterAddress; //planet
+    address public gammaInfinityVault;
 
     address public wbnbAddress;
     address public gammaFarmAddress;
@@ -1758,6 +1757,8 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     
     address public depositFeeAddress = 0xAc88bD12C992B1AdBB43183a0Aa5e3fa5AE3E5eE;
     address public withdrawFeeAddress = 0xAc88bD12C992B1AdBB43183a0Aa5e3fa5AE3E5eE;
+
+    GammaTroller public gammaTroller;
 
     uint256 public entranceFeeFactor;
     uint256 public constant entranceFeeFactorMax = 10000;
@@ -1804,6 +1805,79 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         _;
     }
 
+    function _update() internal virtual {
+
+        if(sharesTotal == 0){
+            return;
+        }
+
+        uint256 earnedBefore = IERC20(earnedAddress).balanceOf(address(this));
+        IPancakeswapFarm(farmContractAddress).deposit(pid, 0);
+        uint256 earnedAfter = IERC20(earnedAddress).balanceOf(address(this));
+        
+        uint256 diff;
+        if(earnedAfter > earnedBefore)
+        diff = earnedAfter - earnedBefore;
+        else
+        diff = 0;
+        if(diff > 0){
+            diff = distributeFees(diff);
+            diff = buyBack(diff); 
+        }
+        
+        stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
+    }
+
+    function safeRewardTransfer(address caller,uint pendingProfit) internal {
+        
+        IERC20(earnedAddress).safeIncreaseAllowance(
+            planetRouterAddress,
+            pendingProfit
+        );
+
+        uint256 gamma_bal_before = IERC20(GAMMAAddress).balanceOf(address(this));
+        _safeSwap(
+            planetRouterAddress,
+            pendingProfit,
+            slippageFactor,
+            earnedToGAMMAPath,
+            address(this),
+            block.timestamp.add(600)
+        );
+        uint256 gamma_bal_after = IERC20(GAMMAAddress).balanceOf(address(this));
+
+        uint256 amount = gamma_bal_after - gamma_bal_before;
+
+        IERC20(GAMMAAddress).safeIncreaseAllowance(
+            gammaInfinityVault,
+            amount
+        );
+
+        GammaInfinityVault(gammaInfinityVault).depositAuthorized(caller, amount);
+
+    }
+
+    function earnGammaProfits() external {
+        
+        // claim pending GAMMA rewards from Green Planet
+        _update(); 
+        
+        UserInfo storage user = userInfo[_msgSender()];
+
+        uint256 pending = 
+            user.shares.mul(stratRewardPerShare).div(1e12).sub(
+                user.earnRewardDebt
+            );
+            
+        if (pending > 0) {
+            safeRewardTransfer(_msgSender(),pending);
+        }
+
+        user.earnRewardDebt = user.shares.mul(stratRewardPerShare).div(1e12); 
+
+    }
+
+
     // Receives new deposits from user
     function deposit(address _userAddress, uint256 _wantAmt)
         public
@@ -1813,97 +1887,90 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         whenNotPaused
         returns (uint256)
     {
+
+        // claim pending GAMMA rewards from Green Planet
+        _update(); 
+
         UserInfo storage user = userInfo[_userAddress];
-        
-        IERC20(wantAddress).safeTransferFrom(
+
+        if(user.shares > 0) {
+
+           /*
+            * If user shares greater than 0 then check if pending is greater than zero 
+            */
+
+            uint256 pending = 
+                user.shares.mul(stratRewardPerShare).div(1e12).sub(
+                    user.earnRewardDebt
+                );
+            
+            if (pending > 0) {
+                safeRewardTransfer(_userAddress,pending);
+            }
+        }
+
+        uint256 sharesAdded;
+
+        if(_wantAmt > 0){
+
+            //If _wantAmt > 0
+
+            IERC20(wantAddress).safeTransferFrom(
             address(msg.sender),
             address(this),
             _wantAmt
-        );
+            );
 
-        uint256 depositFee = _wantAmt.mul(entranceFeeFactorMax.sub(entranceFeeFactor)).div(entranceFeeFactorMax);
-        if(depositFee > 0){
-            IERC20(wantAddress).transfer(depositFeeAddress, depositFee);
-        }
+            uint256 depositFee = _wantAmt.mul(entranceFeeFactorMax.sub(entranceFeeFactor)).div(entranceFeeFactorMax);
+        
+            if(depositFee > 0){
+                IERC20(wantAddress).transfer(depositFeeAddress, depositFee);
+            }
 
-        _wantAmt = _wantAmt.sub(depositFee);
+            _wantAmt = _wantAmt.sub(depositFee);
 
-        uint256 sharesAdded = _wantAmt;
-        if (wantLockedTotal > 0 && sharesTotal > 0) {
-            sharesAdded = _wantAmt
+            sharesAdded = _wantAmt;
+           
+           if (wantLockedTotal > 0 && sharesTotal > 0) {
+                sharesAdded = _wantAmt
                 .mul(sharesTotal)
                 .div(wantLockedTotal);
-            sharesTotal = sharesTotal.add(sharesAdded);
-            user.shares = user.shares.add(sharesAdded);
-        }
-        else{
-            sharesAdded = sharesAdded;
-            sharesTotal = sharesTotal.add(sharesAdded);
-            user.shares = user.shares.add(sharesAdded);
-        }
+                sharesTotal = sharesTotal.add(sharesAdded);
+                user.shares = user.shares.add(sharesAdded);
+            }
+            else{
+                sharesAdded = sharesAdded;
+                sharesTotal = sharesTotal.add(sharesAdded);
+                user.shares = user.shares.add(sharesAdded);
+            }
                 
-        
-        if (isAutoComp) {
             _farm();
-            //Make sure user doesn't rewards instantly for his deposit
-            user.earnRewardDebt = sharesAdded.mul(stratRewardPerShare).add(user.earnRewardDebt); 
 
-        } else {
-            wantLockedTotal = wantLockedTotal.add(_wantAmt);
         }
+
+        user.earnRewardDebt = user.shares.mul(stratRewardPerShare).div(1e12); 
 
         return sharesAdded;
     }
 
     function _farm() internal virtual {
+        
         require(isAutoComp, "!isAutoComp");
+        
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
-        wantLockedTotal = wantAmt;
+
+        wantLockedTotal = wantLockedTotal.add(wantAmt);
+  
         IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
 
-        if (isCAKEStaking) {
-            IPancakeswapFarm(farmContractAddress).enterStaking(wantAmt); // Just for CAKE staking, we dont use deposit()
-        } else {
-            uint256 cakeBefore = IERC20(earnedAddress).balanceOf(address(this));
-            IPancakeswapFarm(farmContractAddress).deposit(pid, wantAmt);
-            uint256 cakeAfter = IERC20(earnedAddress).balanceOf(address(this));
-            
-            uint256 diff;
-            if(cakeAfter > cakeBefore)
-            diff = cakeAfter - cakeBefore;
-            else
-            diff = 0;
-
-            if(diff > 0){
-                diff = distributeFees(diff);
-                diff = buyBack(diff); 
-            }
-            
-            stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
-        }
+        IPancakeswapFarm(farmContractAddress).deposit(pid, wantAmt);
+        
     }
 
     function _unfarm(uint256 _wantAmt) internal virtual {
-        if (isCAKEStaking) {
-            IPancakeswapFarm(farmContractAddress).leaveStaking(_wantAmt); // Just for CAKE staking, we dont use withdraw()
-        } else {
-            uint256 cakeBefore = IERC20(earnedAddress).balanceOf(address(this));
-            IPancakeswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
-            uint256 cakeAfter = IERC20(earnedAddress).balanceOf(address(this));
-            
-            uint256 diff;
-            if(cakeAfter > cakeBefore)
-            diff = cakeAfter - cakeBefore;
-            else
-            diff = 0;
+ 
+        IPancakeswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
 
-            if(diff > 0){
-                diff = distributeFees(diff);
-                diff = buyBack(diff); 
-            } 
-
-            stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
-        }
     }
 
     function withdraw(address _userAddress, uint256 _wantAmt)
@@ -1913,46 +1980,39 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         nonReentrant
         returns (uint256)
     {
-        require(_wantAmt > 0, "_wantAmt <= 0");
+
+        _update(); // claim pending GAMMA rewards from Green Planet
+
         UserInfo storage user = userInfo[_userAddress];
+
+        require(user.shares > 0, "user.shares is 0");
+        require(sharesTotal > 0, "sharesTotal is 0");
+
+        uint256 pending = 
+            user.shares.mul(stratRewardPerShare).div(1e12).sub(
+            user.earnRewardDebt
+            );
+            
+        if (pending > 0) {
+            safeRewardTransfer(_userAddress,pending);
+        }
+
+        require(_wantAmt > 0, "_wantAmt <= 0");
+
+        _unfarm(_wantAmt);
 
         uint256 sharesRemoved = _wantAmt.mul(sharesTotal).div(wantLockedTotal);
         if (sharesRemoved > sharesTotal) {
             sharesRemoved = sharesTotal;
         }
-        
-
-        if (withdrawFeeFactor < withdrawFeeFactorMax && _wantAmt!=0) {
-            uint256 withdrawFee = _wantAmt.mul(withdrawFeeFactorMax.sub(withdrawFeeFactor)).div(withdrawFeeFactorMax);
-            _wantAmt = _wantAmt.mul(withdrawFeeFactor).div(
-                withdrawFeeFactorMax
-            );
-            IERC20(wantAddress).transfer(withdrawFeeAddress, withdrawFee);
-        }
-
-        if (isAutoComp) {
-            _unfarm(_wantAmt);
-            
-            uint256 pendingProfit;
-            
-            if(user.shares.mul(stratRewardPerShare) > user.earnRewardDebt)
-            pendingProfit = ((user.shares).mul(stratRewardPerShare).sub(user.earnRewardDebt)).div(1e12);
-            else
-            pendingProfit = 0;
-            
-            if(pendingProfit > 0)
-            earnGammaProfitsOnWithdraw(_userAddress);
-        }
 
         if(user.shares > sharesRemoved){
         user.shares = user.shares.sub(sharesRemoved);
-        user.earnRewardDebt = (user.shares).mul(stratRewardPerShare);   
         sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         else{
         user.shares = 0;
-        user.earnRewardDebt = 0;
-        sharesTotal = sharesTotal.sub(user.shares);
+        sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
@@ -1966,148 +2026,18 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
         wantLockedTotal = wantLockedTotal.sub(_wantAmt);
 
+        if (withdrawFeeFactor < withdrawFeeFactorMax && _wantAmt!=0) {
+            uint256 withdrawFee = _wantAmt.mul(withdrawFeeFactorMax.sub(withdrawFeeFactor)).div(withdrawFeeFactorMax);
+            _wantAmt = _wantAmt.sub(withdrawFee);
+            IERC20(wantAddress).transfer(withdrawFeeAddress, withdrawFee);
+        }
+
         IERC20(wantAddress).safeTransfer(gammaFarmAddress, _wantAmt);
+
+        user.earnRewardDebt = user.shares.mul(stratRewardPerShare).div(1e12); 
 
         return sharesRemoved;
     }
-    
-    function earnGammaProfitsOnWithdraw(address caller) internal  {
-        UserInfo storage user = userInfo[caller];
-        require(user.shares != 0,"!!User has zero shares");
-        
-
-        /*Distribute this reward profit according to user share*/
-        uint256 pendingProfit = 0;
-        if((user.shares).mul(stratRewardPerShare) > (user.earnRewardDebt))
-        pendingProfit = ((user.shares).mul(stratRewardPerShare).sub(user.earnRewardDebt)).div(1e12);
-        else
-        pendingProfit = 0;
-        
-        require(pendingProfit > 0 ,"No Profits Are Pending!!");
-        
-        /*Safety Check*/
-        uint256 cakeBal = IERC20(earnedAddress).balanceOf(address(this));
-        if (pendingProfit > cakeBal) {
-            pendingProfit = cakeBal;
-        }
-        
-        if(pendingProfit > 0){
-            
-            // uint256[] memory amounts = IPancakeRouter02(planetRouterAddress).getAmountsOut(pendingProfit,earnedToGAMMAPath);
-            /*Buy GAMMA using remaining profit*/
-            
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                planetRouterAddress,
-                pendingProfit
-                );
-
-                _safeSwap(
-                    planetRouterAddress,
-                    pendingProfit,
-                    slippageFactor,
-                    earnedToGAMMAPath,
-                    caller,
-                    block.timestamp.add(600)
-                );
-
-        
-        // uint256 claim = amounts[amounts.length - 1];
-    
-        }
-        
-        lastEarnBlock = block.number;
-    } 
-
-    
-    
-    function userPendingGammaProfit(address userAddress) public view virtual returns (uint256 pendingProfitInCake,uint256 pendingProfitInGamma){
-        
-        UserInfo storage user = userInfo[userAddress];
-        
-        if(stratRewardPerShare > 0 && user.shares > 0){
-            uint cakeBal = IPancakeswapFarm(farmContractAddress).pendingBELT(pid,address(this));
-            
-            if(cakeBal > 0){
-                cakeBal = cakeBal.sub(cakeBal.mul(controllerFee).div(controllerFeeMax));
-                cakeBal = cakeBal.sub(cakeBal.mul(buyBackRate).div(buyBackRateMax));
-            }
-            else{
-                cakeBal = 0;
-            }
-
-            uint tempShare = 0;
-            if(cakeBal > 0 && sharesTotal > 0)
-            tempShare = stratRewardPerShare.add(cakeBal.mul(1e12).div(sharesTotal));
-            else
-            tempShare = stratRewardPerShare;
-            
-            if((user.shares).mul(tempShare) > (user.earnRewardDebt))
-            pendingProfitInCake = ((user.shares).mul(tempShare).sub(user.earnRewardDebt)).div(1e12);
-            else
-            pendingProfitInCake = 0;
-            
-        }
-        
-        
-        if(pendingProfitInCake > 0){
-            uint256[] memory amounts = IPancakeRouter02(planetRouterAddress).getAmountsOut(pendingProfitInCake,earnedToGAMMAPath);
-            pendingProfitInGamma = amounts[amounts.length - 1];
-        }
-       
-    }
-    
-    
-    
-    function earnGammaProfits() public nonReentrant whenNotPaused  {
-        address caller = msg.sender;
-        UserInfo storage user = userInfo[caller];
-        require(user.shares != 0,"!!User has zero shares");
-        
-        /*Withdrawing Rewards*/
-        _unfarm(0);
-
-        /*Distribute this reward profit according to user share*/
-        uint256 pendingProfit;
-        
-        if((user.shares).mul(stratRewardPerShare) > (user.earnRewardDebt))
-        pendingProfit = ((user.shares).mul(stratRewardPerShare).sub(user.earnRewardDebt)).div(1e12);
-        else
-        pendingProfit = 0;
-        
-        require(pendingProfit > 0 ,"No Profits Are Pending!!");
-        
-        /*Safety Check*/
-        uint256 cakeBal = IERC20(earnedAddress).balanceOf(address(this));
-        if (pendingProfit > cakeBal) {
-            pendingProfit = cakeBal;
-        }
-        
-        if(pendingProfit > 0){
-        
-            // uint256[] memory amounts = IPancakeRouter02(planetRouterAddress).getAmountsOut(pendingProfit,earnedToGAMMAPath);
-            /*Buy GAMMA using remaining profit*/
-            
-            IERC20(earnedAddress).safeIncreaseAllowance(
-                planetRouterAddress,
-                pendingProfit
-                );
-
-                _safeSwap(
-                    planetRouterAddress,
-                    pendingProfit,
-                    slippageFactor,
-                    earnedToGAMMAPath,
-                    caller,
-                    block.timestamp.add(600)
-                );
-
-        user.earnRewardDebt = (user.shares).mul(stratRewardPerShare);
-        // uint256 claim = amounts[amounts.length - 1];
-    
-        }
-        
-        lastEarnBlock = block.number;
-    } 
 
 
     function buyBack(uint256 _earnedAmt) internal virtual returns (uint256) {
@@ -2156,49 +2086,40 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         return _earnedAmt;
     }
 
-    function convertDustToEarned() public virtual whenNotPaused {
-        require(isAutoComp, "!isAutoComp");
-        require(!isCAKEStaking, "isCAKEStaking");
+    function userPendingGammaProfit(address userAddress) public view virtual returns (uint256 pendingProfitInCake,uint256 pendingProfitInGamma){
+        
+        UserInfo memory user = userInfo[userAddress];
+        
+        if(stratRewardPerShare > 0 && user.shares > 0){
+            uint cakeBal = IPancakeswapFarm(farmContractAddress).pendingBSW(pid,address(this));
+            
+            if(cakeBal > 0){
+                cakeBal = cakeBal.sub(cakeBal.mul(controllerFee).div(controllerFeeMax));
+                cakeBal = cakeBal.sub(cakeBal.mul(buyBackRate).div(buyBackRateMax));
+            }
+            else{
+                cakeBal = 0;
+            }
 
-        // Converts dust tokens into earned tokens, which will be reinvested on the next earn().
-
-        // Converts token0 dust (if any) to earned tokens
-        uint256 token0Amt = IERC20(token0Address).balanceOf(address(this));
-        if (token0Address != earnedAddress && token0Amt > 0) {
-            IERC20(token0Address).safeIncreaseAllowance(
-                uniRouterAddress,
-                token0Amt
-            );
-
-            // Swap all dust tokens to earned tokens
-            _safeSwap(
-                uniRouterAddress,
-                token0Amt,
-                slippageFactor,
-                token0ToEarnedPath,
-                address(this),
-                block.timestamp.add(600)
-            );
+            uint tempShare = 0;
+            if(cakeBal > 0 && sharesTotal > 0)
+            tempShare = stratRewardPerShare.add(cakeBal.mul(1e12).div(sharesTotal));
+            else
+            tempShare = stratRewardPerShare;
+            
+            if((user.shares).mul(tempShare) > (user.earnRewardDebt))
+            pendingProfitInCake = ((user.shares).mul(tempShare).div(1e12).sub(user.earnRewardDebt));
+            else
+            pendingProfitInCake = 0;
+            
         }
-
-        // Converts token1 dust (if any) to earned tokens
-        uint256 token1Amt = IERC20(token1Address).balanceOf(address(this));
-        if (token1Address != earnedAddress && token1Amt > 0) {
-            IERC20(token1Address).safeIncreaseAllowance(
-                uniRouterAddress,
-                token1Amt
-            );
-
-            // Swap all dust tokens to earned tokens
-            _safeSwap(
-                uniRouterAddress,
-                token1Amt,
-                slippageFactor,
-                token1ToEarnedPath,
-                address(this),
-                block.timestamp.add(600)
-            );
+        
+        
+        if(pendingProfitInCake > 0){
+            uint256[] memory amounts = IPancakeRouter02(planetRouterAddress).getAmountsOut(pendingProfitInCake,earnedToGAMMAPath);
+            pendingProfitInGamma = amounts[amounts.length - 1];
         }
+       
     }
 
     function pause() public virtual onlyAllowGov {
@@ -2299,6 +2220,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         uint256 _amount,
         address _to
     ) public virtual onlyAllowGov {
+        require(_token != GAMMAAddress, "!safe");
         require(_token != earnedAddress, "!safe");
         require(_token != wantAddress, "!safe");
         IERC20(_token).safeTransfer(_to, _amount);
@@ -2323,7 +2245,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         address[] memory _path,
         address _to,
         uint256 _deadline
-    ) internal virtual {
+    ) internal {
         uint256[] memory amounts =
             IPancakeRouter02(_uniRouterAddress).getAmountsOut(_amountIn, _path);
         uint256 amountOut = amounts[amounts.length.sub(1)];
@@ -2339,7 +2261,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     }
 }
 
-contract GammaStrategy_Uranus is StratX2 {
+contract GammaStrategy_AQUA is StratX2 {
     
     address payable public feeAddressesSetter;
     
@@ -2358,7 +2280,9 @@ contract GammaStrategy_Uranus is StratX2 {
         uint256 _controllerFee,
         uint256 _buyBackRate,
         uint256 _entranceFeeFactor,
-        uint256 _withdrawFeeFactor
+        uint256 _withdrawFeeFactor,
+        address _gammaTroller,
+        address _gammaInfinityVault
     ) public {
         wbnbAddress = _addresses[0];
         govAddress = _addresses[1];
@@ -2392,6 +2316,8 @@ contract GammaStrategy_Uranus is StratX2 {
         entranceFeeFactor = _entranceFeeFactor;
         withdrawFeeFactor = _withdrawFeeFactor;
         feeAddressesSetter = 0xFd525F21C17f2469B730a118E0568B4b459d61B9; 
+        gammaTroller = GammaTroller(_gammaTroller);
+        gammaInfinityVault = _gammaInfinityVault;
         transferOwnership(gammaFarmAddress);
     }
     

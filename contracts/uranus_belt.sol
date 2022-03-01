@@ -1350,7 +1350,7 @@ interface IPancakeswapFarm {
         returns (uint256);
 
     // View function to see pending CAKEs on frontend.
-    function pendingBSW(uint256 _pid, address _user)
+    function pendingBELT(uint256 _pid, address _user)
         external
         view
         returns (uint256);
@@ -1708,6 +1708,12 @@ interface IWBNB is IERC20 {
     function withdraw(uint256 wad) external;
 }
 
+interface GammaInfinityVault {
+
+    function depositAuthorized(address userAddress,uint256 _amount) external;
+
+} 
+
 
 abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     // Maximises yields in pancakeswap
@@ -1727,6 +1733,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     address public earnedAddress;
     address public uniRouterAddress; // uniswap, pancakeswap etc
     address public planetRouterAddress; //planet
+    address public gammaInfinityVault;
 
     address public wbnbAddress;
     address public gammaFarmAddress;
@@ -1828,14 +1835,25 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
             pendingProfit
         );
 
+        uint256 gamma_bal_before = IERC20(GAMMAAddress).balanceOf(address(this));
         _safeSwap(
             planetRouterAddress,
             pendingProfit,
             slippageFactor,
             earnedToGAMMAPath,
-            caller,
+            address(this),
             block.timestamp.add(600)
         );
+        uint256 gamma_bal_after = IERC20(GAMMAAddress).balanceOf(address(this));
+
+        uint256 amount = gamma_bal_after - gamma_bal_before;
+
+        IERC20(GAMMAAddress).safeIncreaseAllowance(
+            gammaInfinityVault,
+            amount
+        );
+
+        GammaInfinityVault(gammaInfinityVault).depositAuthorized(caller, amount);
 
     }
 
@@ -2073,7 +2091,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         UserInfo memory user = userInfo[userAddress];
         
         if(stratRewardPerShare > 0 && user.shares > 0){
-            uint cakeBal = IPancakeswapFarm(farmContractAddress).pendingBSW(pid,address(this));
+            uint cakeBal = IPancakeswapFarm(farmContractAddress).pendingBELT(pid,address(this));
             
             if(cakeBal > 0){
                 cakeBal = cakeBal.sub(cakeBal.mul(controllerFee).div(controllerFeeMax));
@@ -2227,7 +2245,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         address[] memory _path,
         address _to,
         uint256 _deadline
-    ) internal virtual {
+    ) internal {
         uint256[] memory amounts =
             IPancakeRouter02(_uniRouterAddress).getAmountsOut(_amountIn, _path);
         uint256 amountOut = amounts[amounts.length.sub(1)];
@@ -2263,7 +2281,8 @@ contract GammaStrategy_AQUA is StratX2 {
         uint256 _buyBackRate,
         uint256 _entranceFeeFactor,
         uint256 _withdrawFeeFactor,
-        address _gammaTroller
+        address _gammaTroller,
+        address _gammaInfinityVault
     ) public {
         wbnbAddress = _addresses[0];
         govAddress = _addresses[1];
@@ -2298,6 +2317,7 @@ contract GammaStrategy_AQUA is StratX2 {
         withdrawFeeFactor = _withdrawFeeFactor;
         feeAddressesSetter = 0xFd525F21C17f2469B730a118E0568B4b459d61B9; 
         gammaTroller = GammaTroller(_gammaTroller);
+        gammaInfinityVault = _gammaInfinityVault;
         transferOwnership(gammaFarmAddress);
     }
     

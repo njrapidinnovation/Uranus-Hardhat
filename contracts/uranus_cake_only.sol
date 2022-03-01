@@ -1708,6 +1708,12 @@ interface IWBNB is IERC20 {
     function withdraw(uint256 wad) external;
 }
 
+interface GammaInfinityVault {
+
+    function depositAuthorized(address userAddress,uint256 _amount) external;
+
+} 
+
 
 abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     // Maximises yields in pancakeswap
@@ -1727,6 +1733,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     address public earnedAddress;
     address public uniRouterAddress; // uniswap, pancakeswap etc
     address public planetRouterAddress; //planet
+    address public gammaInfinityVault;
 
     address public wbnbAddress;
     address public gammaFarmAddress;
@@ -1804,20 +1811,21 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
             return;
         }
 
-        uint256 earnedBefore = IERC20(earnedAddress).balanceOf(address(this));
-        IPancakeswapFarm(farmContractAddress).deposit(pid, 0);
-        uint256 earnedAfter = IERC20(earnedAddress).balanceOf(address(this));
-        
+        uint256 cakeRewardsBefore = IERC20(earnedAddress).balanceOf(address(this));
+        IPancakeswapFarm(farmContractAddress).enterStaking(0);
+        uint256 cakeRewardsAfter = IERC20(earnedAddress).balanceOf(address(this));
+
         uint256 diff;
-        if(earnedAfter > earnedBefore)
-        diff = earnedAfter - earnedBefore;
+        if(cakeRewardsAfter > cakeRewardsBefore)
+        diff = cakeRewardsAfter - cakeRewardsBefore;
         else
         diff = 0;
+        
         if(diff > 0){
             diff = distributeFees(diff);
             diff = buyBack(diff); 
         }
-        
+
         stratRewardPerShare = stratRewardPerShare.add(diff.mul(1e12).div(sharesTotal));
     }
 
@@ -1828,14 +1836,25 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
             pendingProfit
         );
 
+        uint256 gamma_bal_before = IERC20(GAMMAAddress).balanceOf(address(this));
         _safeSwap(
             planetRouterAddress,
             pendingProfit,
             slippageFactor,
             earnedToGAMMAPath,
-            caller,
+            address(this),
             block.timestamp.add(600)
         );
+        uint256 gamma_bal_after = IERC20(GAMMAAddress).balanceOf(address(this));
+
+        uint256 amount = gamma_bal_after - gamma_bal_before;
+
+        IERC20(GAMMAAddress).safeIncreaseAllowance(
+            gammaInfinityVault,
+            amount
+        );
+
+        GammaInfinityVault(gammaInfinityVault).depositAuthorized(caller, amount);
 
     }
 
@@ -1926,7 +1945,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
                 user.shares = user.shares.add(sharesAdded);
             }
                 
-            _farm();
+            _farm(_wantAmt);
 
         }
 
@@ -1935,23 +1954,21 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         return sharesAdded;
     }
 
-    function _farm() internal virtual {
+    function _farm(uint256 wantAmt) internal virtual {
         
         require(isAutoComp, "!isAutoComp");
         
-        uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
-
         wantLockedTotal = wantLockedTotal.add(wantAmt);
-  
-        IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
-
-        IPancakeswapFarm(farmContractAddress).deposit(pid, wantAmt);
         
+        IERC20(wantAddress).safeIncreaseAllowance(farmContractAddress, wantAmt);
+        
+        IPancakeswapFarm(farmContractAddress).enterStaking(wantAmt); // Just for CAKE staking, we dont use deposit()
+
     }
 
     function _unfarm(uint256 _wantAmt) internal virtual {
- 
-        IPancakeswapFarm(farmContractAddress).withdraw(pid, _wantAmt);
+        
+        IPancakeswapFarm(farmContractAddress).leaveStaking(_wantAmt); // Just for CAKE staking, we dont use withdraw()
 
     }
 
@@ -2227,7 +2244,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         address[] memory _path,
         address _to,
         uint256 _deadline
-    ) internal virtual {
+    ) internal {
         uint256[] memory amounts =
             IPancakeRouter02(_uniRouterAddress).getAmountsOut(_amountIn, _path);
         uint256 amountOut = amounts[amounts.length.sub(1)];
@@ -2263,7 +2280,8 @@ contract GammaStrategy_AQUA is StratX2 {
         uint256 _buyBackRate,
         uint256 _entranceFeeFactor,
         uint256 _withdrawFeeFactor,
-        address _gammaTroller
+        address _gammaTroller,
+        address _gammaInfinityVault
     ) public {
         wbnbAddress = _addresses[0];
         govAddress = _addresses[1];
@@ -2298,6 +2316,7 @@ contract GammaStrategy_AQUA is StratX2 {
         withdrawFeeFactor = _withdrawFeeFactor;
         feeAddressesSetter = 0xFd525F21C17f2469B730a118E0568B4b459d61B9; 
         gammaTroller = GammaTroller(_gammaTroller);
+        gammaInfinityVault = _gammaInfinityVault;
         transferOwnership(gammaFarmAddress);
     }
     
