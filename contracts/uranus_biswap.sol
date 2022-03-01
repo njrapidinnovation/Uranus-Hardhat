@@ -2011,8 +2011,8 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         else{
+        sharesTotal = sharesTotal.sub(user.shares);
         user.shares = 0;
-        sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
