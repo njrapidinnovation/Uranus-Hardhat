@@ -1848,7 +1848,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
         uint256 pending = 
             user.shares.mul(stratRewardPerShare).div(1e12).sub(
-                user.rewardDebt
+                user.earnRewardDebt
             );
             
         if (pending > 0) {
@@ -1883,13 +1883,15 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
             uint256 pending = 
                 user.shares.mul(stratRewardPerShare).div(1e12).sub(
-                    user.rewardDebt
+                    user.earnRewardDebt
                 );
             
             if (pending > 0) {
                 safeRewardTransfer(_userAddress,pending);
             }
         }
+
+        uint256 sharesAdded;
 
         if(_wantAmt > 0){
 
@@ -1909,7 +1911,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
             _wantAmt = _wantAmt.sub(depositFee);
 
-            uint256 sharesAdded = _wantAmt;
+            sharesAdded = _wantAmt;
            
            if (wantLockedTotal > 0 && sharesTotal > 0) {
                 sharesAdded = _wantAmt
@@ -1970,7 +1972,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
         uint256 pending = 
             user.shares.mul(stratRewardPerShare).div(1e12).sub(
-            user.rewardDebt
+            user.earnRewardDebt
             );
             
         if (pending > 0) {
@@ -1992,7 +1994,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         }
         else{
         user.shares = 0;
-        sharesTotal = sharesTotal.sub(user.shares);
+        sharesTotal = sharesTotal.sub(sharesRemoved);
         }
         
         uint256 wantAmt = IERC20(wantAddress).balanceOf(address(this));
@@ -2008,9 +2010,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
 
         if (withdrawFeeFactor < withdrawFeeFactorMax && _wantAmt!=0) {
             uint256 withdrawFee = _wantAmt.mul(withdrawFeeFactorMax.sub(withdrawFeeFactor)).div(withdrawFeeFactorMax);
-            _wantAmt = _wantAmt.mul(withdrawFeeFactor).div(
-                withdrawFeeFactorMax
-            );
+            _wantAmt = _wantAmt.sub(withdrawFee);
             IERC20(wantAddress).transfer(withdrawFeeAddress, withdrawFee);
         }
 
@@ -2202,6 +2202,7 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
         uint256 _amount,
         address _to
     ) public virtual onlyAllowGov {
+        require(_token != GAMMAAddress, "!safe");
         require(_token != earnedAddress, "!safe");
         require(_token != wantAddress, "!safe");
         IERC20(_token).safeTransfer(_to, _amount);
