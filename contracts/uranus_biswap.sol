@@ -1698,10 +1698,6 @@ contract Pausable is Context {
     }
 }
 
-interface GammaTroller {
-    function claimGamma(address[] memory holders,address[] memory gTokens,bool borrowers,bool suppliers) external ;
-}
-
 interface IWBNB is IERC20 {
     function deposit() external payable;
 
@@ -1757,8 +1753,6 @@ abstract contract StratX2 is Ownable, ReentrancyGuard, Pausable {
     
     address public depositFeeAddress = 0xAc88bD12C992B1AdBB43183a0Aa5e3fa5AE3E5eE;
     address public withdrawFeeAddress = 0xAc88bD12C992B1AdBB43183a0Aa5e3fa5AE3E5eE;
-
-    GammaTroller public gammaTroller;
 
     uint256 public entranceFeeFactor;
     uint256 public constant entranceFeeFactorMax = 10000;
@@ -2281,7 +2275,6 @@ contract GammaStrategy_AQUA is StratX2 {
         uint256 _buyBackRate,
         uint256 _entranceFeeFactor,
         uint256 _withdrawFeeFactor,
-        address _gammaTroller,
         address _gammaInfinityVault
     ) public {
         wbnbAddress = _addresses[0];
@@ -2316,7 +2309,6 @@ contract GammaStrategy_AQUA is StratX2 {
         entranceFeeFactor = _entranceFeeFactor;
         withdrawFeeFactor = _withdrawFeeFactor;
         feeAddressesSetter = 0xFd525F21C17f2469B730a118E0568B4b459d61B9; 
-        gammaTroller = GammaTroller(_gammaTroller);
         gammaInfinityVault = _gammaInfinityVault;
         transferOwnership(gammaFarmAddress);
     }
