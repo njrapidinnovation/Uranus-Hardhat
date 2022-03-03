@@ -1,0 +1,67 @@
+const hre = require("hardhat");
+const farmAddress = "0xdbc1a13490deef9c3c12b44fe77b503c1b061739";
+const pool_symbols = ["WBNB-SOL","WBNB-AVAX","WBNB-MATIC","WBNB-BSW","WBNB-SHIBU","USDT-BSW","FIL-BUSD","USDC-LTC"];
+var res = [];
+async function main() {
+  // Hardhat always runs the compile task when running scripts with its command
+  // line interface.
+  //
+  // If this script is run directly using `node` you may want to call compile
+  // manually to make sure everything is compiled
+  // await hre.run('compile');
+
+  const farm = await hre.ethers.getContractAt("contracts/biswap_farm.sol:MasterChef",farmAddress)
+
+  const poolLength = await farm.poolLength();
+
+  for(var i = 0 ; i < poolLength ; i++) {
+
+    const poolInfo = await farm.poolInfo(i);
+    const lpToken = poolInfo.lpToken;
+    const lp = await hre.ethers.getContractAt("contracts/lp.sol:BiswapPair",lpToken);
+    const name = await lp.name();
+    
+    if(name.includes("LP") || name.includes("lp")) {
+        const token0 = await lp.token0();
+        const token1 = await lp.token1();
+        const token0_inst = await hre.ethers.getContractAt("contracts/lp.sol:BiswapPair",token0);
+        const token1_inst = await hre.ethers.getContractAt("contracts/lp.sol:BiswapPair",token1); 
+        const symbol0 = await token0_inst.symbol();
+        const symbol1 = await token1_inst.symbol();
+        const res1 = `${symbol0}-${symbol1}`;
+        const res2 = `${symbol1}-${symbol0}`;
+        var poolId = i;
+        var found = false;
+        var pool_name = res1;
+        for(var j = 0 ; j < pool_symbols.length ; j++){
+            if(pool_symbols[j] === res1 || pool_symbols[j] === res2){
+                found = true;
+                poolId = i;
+                pool_name = pool_symbols[j];
+                break;
+            }
+        }
+        console.log("\n ",poolId," | ",pool_name," | ",lpToken,"\n");
+        if(found){
+            res.push({
+                poolId,
+                pool_name,
+                lpToken
+            })
+        }
+    }
+
+  }
+
+  console.log(res);
+
+}
+
+// We recommend this pattern to be able to use async/await everywhere
+// and properly handle errors.
+main()
+  .then(() => process.exit(0))
+  .catch((error) => {
+    console.error(error);
+    process.exit(1);
+  });
